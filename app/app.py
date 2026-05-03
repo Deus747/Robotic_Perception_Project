@@ -881,7 +881,7 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue"), title="T-Rex2 OBB App")
     obb_preview = gr.HTML(label="Projected OBB preview for all frames")
 
     gr.Markdown("## 7. Export")
-    export_text = gr.Textbox(label="Teacher-format JSON", lines=20)
+    export_text = gr.Textbox(label="Output JSON", lines=20)
 
     load_btn.click(build_gallery, inputs=[dataset_dir], outputs=[app_state, gallery, load_summary, selected_reference])
     gallery.select(select_reference, inputs=[app_state], outputs=[app_state, ref_summary, selected_reference])

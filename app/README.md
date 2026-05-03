@@ -8,7 +8,7 @@ Standalone Gradio app for:
 4. calling the T-Rex2 API on selected target frames
 5. confirming detections per frame
 6. fitting a 3D OBB from reference + confirmed boxes
-7. exporting teacher-format JSON
+7. exporting output JSON
 
 This app is separate from the upstream `T-Rex` repository so it is easier to put in your own GitHub repo.
 
@@ -31,6 +31,13 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
+
+The app uses the hosted T-Rex2 HTTP API, so normal use does not require a local T-Rex2 model checkout. Useful references:
+
+- T-Rex project repository: <https://github.com/IDEA-Research/T-Rex>
+- DeepDataSpace / T-Rex2 visual prompting API: <https://deepdataspace.com/playground/ivp>
+
+You need a T-Rex2 API token from DeepDataSpace before launching the app.
 
 If you already have the `T-Rex\.venv` environment working, you can reuse it. The launcher will automatically use:
 
@@ -58,7 +65,7 @@ Optional:
 - Candidate confirmation is done with a frame dropdown and a candidate-number dropdown.
 - Candidate preview defaults to showing only the selected candidate for cleaner manual checking. Enable `Show all candidates in preview` when you need to compare all detections in a frame.
 - Use `Remove From Reference Selection` to remove a frame from the selected-reference list without deleting the dataset image. Press `Populate Reference Prompters` again when you want the two reference boxes refreshed from the current selection.
-- Fitted OBBs are cumulative. Fitting a new entity appends or replaces that entity in the teacher-format JSON and in the all-frame projected OBB visualization.
+- Fitted OBBs are cumulative. Fitting a new entity appends or replaces that entity in the output JSON and in the all-frame projected OBB visualization.
 - Use `Clear Current Object Observations` before starting manual confirmation for the next object if you are not launching a fresh detection run.
 - The projected OBB preview renders all dataset frames in a horizontal scroll region and overlays every fitted object currently stored in the app state.
 - The default 3D fit mode is `auto_geometric`, which runs the stronger multi-hypothesis OBB fitter used in the main project:

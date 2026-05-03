@@ -221,9 +221,39 @@ This combines high-recall YOLO-World proposals with DINOv2 visual similarity ran
 
 The app is the preferred interface for final unknown-object manual detection and 3D OBB fitting.
 
+### App Demo
+
+The short tour below shows the intended app workflow: load the posed-image dataset, choose two visual reference frames, run T-Rex2 on target frames, manually confirm candidates, fit a 3D OBB, inspect the projected OBB across frames, and export the cumulative output JSON.
+
+![T-Rex2 OBB App demo](docs/demo.gif)
+
+### T-Rex2 App Installation
+
+The app calls the hosted T-Rex2 HTTP API through `app/trex2_api.py`. It does not require a local T-Rex2 model checkout for normal use, but the original project and API documentation are useful references:
+
+- T-Rex project repository: <https://github.com/IDEA-Research/T-Rex>
+- DeepDataSpace / T-Rex2 API documentation: <https://deepdataspace.com/playground/ivp>
+
+Install the app environment:
+
+```powershell
+cd app
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+You need a T-Rex2 API token from DeepDataSpace. Then launch:
+
 ```powershell
 cd app
 .\launch.ps1 -Token "YOUR_TREX2_API_TOKEN"
+```
+
+Optional custom port:
+
+```powershell
+.\launch.ps1 -Token "YOUR_TREX2_API_TOKEN" -Port 7863
 ```
 
 App features:
@@ -232,7 +262,7 @@ App features:
 - selected-only candidate preview for easier manual checking,
 - optional all-candidates preview,
 - current-object observation clearing,
-- cumulative teacher-format JSON export,
+- cumulative output JSON export,
 - all-frame horizontal-scroll OBB visualization,
 - `auto_geometric` 3D OBB fitting that matches `reconstruction/refit_nonml_geometric_obbs.py`.
 
@@ -309,4 +339,3 @@ The original notebooks were not committed. Their important sections were convert
 - YOLO-World + DINOv2 exemplar ranking: `unsupervised/yoloworld_dinov2_exemplar.py`
 - T-Rex2 visual prompting and OBB app: `app/`
 - 3D OBB fitting: `reconstruction/`
-

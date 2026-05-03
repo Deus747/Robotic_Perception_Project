@@ -1,0 +1,10 @@
+{
+  "frame": "frame_000319.png",
+  "detection_index": 0,
+  "class": "power_socket",
+  "raw_class": "power_socket",
+  "class_id": 0,
+  "confidence": 0.95,
+  "bbox_xyxy_px": [1434.7, 644.2, 1459.8, 681.3],
+  "center_px": [1447.2, 662.8]
+}

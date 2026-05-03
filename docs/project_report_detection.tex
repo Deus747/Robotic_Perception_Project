@@ -1,0 +1,434 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{setspace}
+\usepackage{titlesec}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue,
+  urlcolor=blue,
+  citecolor=blue
+}
+
+\titleformat{\section}{\large\bfseries}{\thesection}{0.75em}{}
+\titleformat{\subsection}{\normalsize\bfseries}{\thesubsection}{0.75em}{}
+
+\title{\textbf{Robotic Perception Final Project Report}\\Detection Pipelines for Known and Unknown Object Localization}
+\author{%
+  Replace With Name \\
+  Replace With Student ID
+}
+\date{\today}
+
+\begin{document}
+\maketitle
+\onehalfspacing
+
+\begin{abstract}
+This report summarizes the detection-side methodology developed for the Robotic Perception final project. The project brief requires semantic localization of scene entities from posed RGB images, with baseline emphasis on \texttt{power\_socket} and \texttt{ethernet\_socket}, and additional evaluation on previously unseen objects. The central challenge is that the critical objects are very small, visually ambiguous, and observed under large viewpoint changes. The work therefore split into two branches. For known objects, a supervised detector was trained using YOLO with dataset cleaning, targeted augmentation, and SAHI-based sliced inference. For unknown objects, a series of increasingly stronger open-vocabulary and exemplar-based pipelines were explored: base world models, world models with SAHI-style slicing, DINOv2 feature matching with sliding windows, YOLO-World proposals ranked by DINOv2 similarity, and finally T-Rex2 visual prompting. This report explains each stage, the reasoning behind it, the main implementation choices, and the observed failure modes that motivated the next stage.
+\end{abstract}
+
+\section{Introduction}
+
+The project sits in the broader setting of metric-semantic reconstruction from posed images. In practical terms, the dataset provides RGB frames, camera intrinsics, camera poses, and a sample answer file containing one valid object entry for \texttt{vga\_socket}. The baseline semantic targets are \texttt{power\_socket} and \texttt{ethernet\_socket}, while the final evaluation may also request additional objects not seen during detector training.
+
+The detection problem is difficult for three reasons. First, the important sockets are physically small and occupy only a small number of pixels in the original frames. Second, they are visually similar to many other dark, rectangular structures in the scene, which makes naive open-vocabulary detection unstable. Third, the released images are not a smooth video; they contain substantial viewpoint jumps, so standard temporal tracking assumptions are weak.
+
+For this reason, the project was organized around two complementary goals:
+\begin{enumerate}[leftmargin=1.5em]
+  \item build a reliable supervised detector for the known baseline objects, and
+  \item investigate a robust zero-shot or one-shot pipeline for previously unseen objects.
+\end{enumerate}
+
+This report focuses only on detection. The later 3D OBB fitting and geometric refinement stage is intentionally left out here and will be documented separately.
+
+\section{Problem Definition}
+
+From the project assets and brief, the immediate semantic targets are object instances such as \texttt{power\_socket}, \texttt{ethernet\_socket}, and the provided \texttt{vga\_socket}. The major open question is how to handle objects that are not part of the supervised label set at training time.
+
+The detection subproblem can therefore be split into:
+\begin{itemize}[leftmargin=1.5em]
+  \item \textbf{Known-object detection:} train a dedicated detector for the small, repeated semantic classes available in the labeled data.
+  \item \textbf{Unknown-object detection:} given only a category name or a visual example, localize the object across multiple frames despite viewpoint changes and without class-specific training.
+\end{itemize}
+
+The technical constraints visible in the dataset are:
+\begin{itemize}[leftmargin=1.5em]
+  \item input images are high resolution, but the target objects are still tiny;
+  \item several objects of interest appear near cluttered background structures;
+  \item large frame-to-frame appearance changes invalidate simple tracking assumptions;
+  \item baseline open-vocabulary models tend to overfire on contextual regions rather than the true socket itself.
+\end{itemize}
+
+\section{Dataset and Preparation}
+
+The working directory contains:
+\begin{itemize}[leftmargin=1.5em]
+  \item RGB images under \texttt{Data/*.png},
+  \item camera intrinsics in \texttt{intrinsic.json},
+  \item camera poses in \texttt{poses.json},
+  \item a sample answer file in \texttt{sample\_answers.json},
+  \item the main training notebooks \texttt{RP\_3class.ipynb} and \texttt{RP\_11class\_merged.ipynb},
+  \item exploratory notebooks for open-vocabulary and exemplar pipelines.
+\end{itemize}
+
+For supervised training, the labels were first remapped into contiguous class IDs and hard-cleaned. In the three-class training notebook, the retained semantic IDs were:
+\begin{itemize}[leftmargin=1.5em]
+  \item \texttt{power\_socket},
+  \item \texttt{ethernet\_port},
+  \item \texttt{vga\_socket}.
+\end{itemize}
+
+In the merged multi-class notebook, the set was extended to include additional easier classes such as \texttt{bottle} and \texttt{purifier}, as well as other scene objects. This second notebook was useful for sanity checks and for understanding how easier classes behave under the same detector family.
+
+\section{Known-Object Detection: Supervised YOLO + SAHI}
+
+\subsection{Motivation}
+
+The known objects are small enough that full-frame detection alone is unreliable. Even when the network is trained specifically on sockets, the object footprint is so small that direct inference at the native image scale underuses the available pixel resolution. This is exactly the regime where sliced inference is useful.
+
+For that reason, the supervised branch was designed as:
+\[
+\text{clean labels} \rightarrow \text{targeted augmentation} \rightarrow \text{YOLO training} \rightarrow \text{SAHI sliced inference}.
+\]
+
+\subsection{Training Setup}
+
+The core training experiments are contained in \texttt{RP\_3class.ipynb} and \texttt{RP\_11class\_merged.ipynb}. The detector backbone in both cases is a YOLO-26 small model loaded as \texttt{yolo26s.pt}. The three-class configuration used:
+\begin{itemize}[leftmargin=1.5em]
+  \item image size: \(1024 \times 1024\),
+  \item epochs: \(100\),
+  \item batch size: \(16\),
+  \item patience: \(200\),
+  \item initial learning rate: \(0.001\),
+  \item warmup epochs: \(5\),
+  \item dropout: \(0.1\),
+  \item confidence prior during training: \(0.2\).
+\end{itemize}
+
+The training data was not left in its raw form. A geometry-focused augmentation pipeline was used to improve invariance while preserving the object shape cues needed for small hardware parts:
+\begin{itemize}[leftmargin=1.5em]
+  \item horizontal flips,
+  \item limited in-plane rotation,
+  \item perspective distortion,
+  \item affine shear,
+  \item resizing to \(1024 \times 1024\).
+\end{itemize}
+
+The notebook also introduced targeted object-centric crop augmentation, with a minimum crop ratio and a relatively high number of augmentations per crop. This is important because the sockets are small enough that ordinary full-image augmentation would not sufficiently rebalance the detector toward the object scale of interest.
+
+\subsection{Why SAHI Was Necessary}
+
+After training, inference was performed through SAHI using an Ultralytics detection wrapper:
+\begin{itemize}[leftmargin=1.5em]
+  \item slice height: \(512\),
+  \item slice width: \(512\),
+  \item overlap ratios: \(0.3\) in both directions,
+  \item postprocessing: NMM,
+  \item standard full-image prediction retained alongside sliced prediction.
+\end{itemize}
+
+The reason SAHI was necessary is straightforward: without slicing, the socket occupies too few effective pixels in the detector's receptive field. SAHI increases the apparent scale of the object by evaluating overlapping local crops. This improves recall substantially for small objects whose discriminative edges would otherwise be blurred into the background at full-frame scale.
+
+In this project, the claim is not that SAHI is a minor speed or convenience optimization. It is a structural requirement for the small-socket regime. Without SAHI-style slicing, known-object detection was not sufficiently reliable.
+
+\subsection{Outcome and Limitations}
+
+The supervised YOLO branch was the strongest option for the known labels. It is class-specific, uses task-matched augmentations, and benefits directly from sliced inference. It is therefore the most appropriate baseline for \texttt{power\_socket} and \texttt{ethernet\_socket}.
+
+However, this branch does not solve the final-day unknown-object problem. It is fundamentally closed-set: the network can only predict what it has been trained to classify. This limitation motivated the open-vocabulary and exemplar-based experiments described next.
+
+\section{Unknown-Object Detection: Open-Vocabulary and Exemplar Search}
+
+\subsection{Design Requirement}
+
+The unknown-object branch had to satisfy a stricter requirement: detect objects that were not part of the supervised training set and may appear under significant viewpoint variation. The work progressed through several stages:
+\begin{enumerate}[leftmargin=1.5em]
+  \item direct use of open-vocabulary world models,
+  \item adding SAHI-style slicing to those world models,
+  \item pure DINOv2 sliding-window feature matching,
+  \item YOLO-World proposals ranked with DINOv2 visual similarity,
+  \item T-Rex2 visual prompting.
+\end{enumerate}
+
+Each stage was retained or discarded based on its practical behavior on the dataset rather than theoretical appeal alone.
+
+\section{Stage 1: Base World Models}
+
+\subsection{Models Considered}
+
+The first zero-shot candidates were standard open-vocabulary detectors, primarily:
+\begin{itemize}[leftmargin=1.5em]
+  \item YOLO-World,
+  \item GroundingDINO,
+  \item OWL-ViT / OWLv2 as conceptual alternatives.
+\end{itemize}
+
+The logic was simple. If a model can localize an object from text alone, then unknown-object detection can be handled by prompt engineering rather than retraining.
+
+\subsection{Why This Failed}
+
+On this dataset, direct text-prompted detection was not reliable enough. The reasons were structural:
+\begin{itemize}[leftmargin=1.5em]
+  \item the target objects are too small relative to the full frame;
+  \item prompts such as \texttt{power socket} and \texttt{ethernet port} are semantically broad and can match many scene elements;
+  \item ports are dark and rectangular, so the model confuses them with unrelated clutter;
+  \item context-heavy prompts encourage the detector to ground an entire region, such as the PC panel, rather than the actual socket.
+\end{itemize}
+
+In practice, the detector often returned:
+\begin{itemize}[leftmargin=1.5em]
+  \item false positives on monitors, tables, or other rectangles,
+  \item detections on the entire back panel rather than the socket,
+  \item unstable predictions across frames.
+\end{itemize}
+
+The conclusion was that base world models were useful as high-level proposal generators but not sufficient as final detectors for this dataset.
+
+\section{Stage 2: World Models with SAHI-Style Slicing}
+
+\subsection{GroundingDINO + SAHI-Style Slicing}
+
+The next step was to bring the same small-object logic from the supervised branch into the open-vocabulary setting. This is captured in \texttt{sahi\_groundingdino\_pipeline\_colab.ipynb}.
+
+The pipeline used the latest Hugging Face GroundingDINO interface, but the slicing was implemented manually rather than through the SAHI wrapper. This choice was deliberate. The manual version allowed:
+\begin{itemize}[leftmargin=1.5em]
+  \item direct control over prompt handling,
+  \item tile-level batch inference,
+  \item explicit rejection of degenerate whole-tile boxes,
+  \item easier debugging of prompt failures.
+\end{itemize}
+
+The sliced inference stage used overlapping windows and low thresholds for proposal generation, followed by per-entity filtering and non-maximum suppression.
+
+\subsection{Two-Stage Prompting}
+
+The notebook also explored a two-stage scheme:
+\begin{enumerate}[leftmargin=1.5em]
+  \item use GroundingDINO to detect a coarse panel-level region such as \texttt{rear I/O panel} or \texttt{computer ports},
+  \item crop that region,
+  \item run a second detector pass with fine object-only prompts such as \texttt{RJ45 socket}, \texttt{IEC C14 inlet}, or \texttt{silver D-sub connector}.
+\end{enumerate}
+
+This design was reasonable because it first narrows the search area and then tries to resolve the small object inside the crop.
+
+\subsection{Observed Failure Modes}
+
+This stage improved recall relative to full-frame inference, but it still failed in important ways:
+\begin{itemize}[leftmargin=1.5em]
+  \item if prompts included scene context such as \texttt{on PC back panel}, the detector often grounded the entire tile;
+  \item if prompts were too broad, the model returned many random local structures;
+  \item if thresholds were raised, the true target disappeared;
+  \item if thresholds were lowered, the result became dominated by false positives.
+\end{itemize}
+
+The core issue is that slicing solves the scale problem but not the semantic ambiguity problem. The object is still tiny and still looks like several other structures. Therefore this stage was better than base world models, but it still could not be trusted as the final unknown-object pipeline.
+
+\section{Stage 3: DINOv2 Feature Matching with Sliding Windows}
+
+\subsection{Motivation}
+
+After the instability of text-prompted detection, the next idea was to abandon text entirely and use pure visual similarity. If one reference crop of the target is available, then the problem can be reformulated as:
+\[
+\text{reference crop} \rightarrow \text{search for visually similar windows in each frame}.
+\]
+
+This is what \texttt{DINO\_V2\_SW.ipynb} implements.
+
+\subsection{Method}
+
+The notebook extracts a DINOv2 embedding for the reference crop and then slides overlapping windows over each target image at multiple scales. The key settings visible in the notebook are:
+\begin{itemize}[leftmargin=1.5em]
+  \item base window size: \(224\),
+  \item overlap: \(0.75\),
+  \item scales: \([0.60, 0.75, 0.90, 1.0, 1.10, 1.25, 1.50]\),
+  \item top-K before NMS: \(500\),
+  \item NMS IoU threshold: \(0.15\),
+  \item similarity threshold base: \(0.40\).
+\end{itemize}
+
+For each window:
+\begin{enumerate}[leftmargin=1.5em]
+  \item compute a DINOv2 embedding,
+  \item compare it to the reference embedding with cosine similarity,
+  \item retain the highest-scoring candidates,
+  \item apply non-maximum suppression to reduce duplicates.
+\end{enumerate}
+
+\subsection{Why This Was Attractive}
+
+This method removes the text ambiguity entirely. It also fits the data better than tracking-based methods because the frames are effectively an unordered multi-view set rather than a smooth video.
+
+\subsection{Why It Was Still Not Enough}
+
+The main problem is that exhaustive sliding-window matching is visually agnostic to object semantics. It only knows whether a patch is similar to the reference in feature space. On a cluttered scene, this creates three issues:
+\begin{itemize}[leftmargin=1.5em]
+  \item many windows are locally similar even when they are not the same object,
+  \item computational cost grows quickly because many scales and heavy overlap are required,
+  \item small reference crops can overfit to texture, color, or local contrast rather than the true object identity.
+\end{itemize}
+
+Thus DINOv2 sliding-window matching was conceptually valid and useful as a retrieval baseline, but it was not sufficiently selective on its own.
+
+\section{Stage 4: YOLO-World Proposals + DINOv2 Similarity}
+
+\subsection{Motivation}
+
+The next refinement combined the high recall of a world detector with the selectivity of feature matching. This pipeline is documented in \texttt{yolo\_world\_exemplar\_pipeline\_colab.ipynb}.
+
+The idea was:
+\[
+\text{YOLO-World proposals} \rightarrow \text{crop proposals} \rightarrow \text{DINOv2 ranking against reference crop}.
+\]
+
+This avoids exhaustive sliding windows on every possible location while still removing dependence on text confidence alone.
+
+\subsection{Method}
+
+The implementation used:
+\begin{itemize}[leftmargin=1.5em]
+  \item YOLO-World model: \texttt{yolov8x-worldv2.pt},
+  \item low proposal confidence: \(0.005\),
+  \item slice size: \(640\),
+  \item overlap: \(0.55\),
+  \item inference size: \(960\),
+  \item capped candidates per frame: \(80\).
+\end{itemize}
+
+The process was:
+\begin{enumerate}[leftmargin=1.5em]
+  \item run YOLO-World with broad, high-recall prompts such as \texttt{object}, \texttt{socket}, \texttt{connector}, \texttt{computer part};
+  \item apply SAHI-style slicing to ensure small objects are not missed;
+  \item reject clearly bad boxes based on size heuristics;
+  \item crop each proposal and embed it with DINOv2;
+  \item compare each crop to the reference crop using cosine similarity;
+  \item form a combined score, dominated by visual similarity with a small contribution from proposal confidence.
+\end{enumerate}
+
+\subsection{Why This Was Better}
+
+This was the first open-vocabulary pipeline that matched the data regime reasonably well:
+\begin{itemize}[leftmargin=1.5em]
+  \item YOLO-World provides high recall,
+  \item DINOv2 removes much of the text ambiguity,
+  \item slicing preserves small-object sensitivity,
+  \item the reference crop gives explicit visual grounding.
+\end{itemize}
+
+\subsection{Remaining Limitations}
+
+Even this stronger hybrid method still had failure modes:
+\begin{itemize}[leftmargin=1.5em]
+  \item if the proposal set misses the object, DINOv2 never sees the correct crop;
+  \item if many proposals share similar shape or texture, DINOv2 can still rank distractors highly;
+  \item prompt quality remains relevant because it controls the initial proposal pool;
+  \item manual validation is still needed before trusting detections across frames.
+\end{itemize}
+
+Therefore this stage was a strong interim solution, but not yet the cleanest formulation of the unknown-object problem.
+
+\section{Stage 5: T-Rex2 Visual Prompting}
+
+\subsection{Why T-Rex2 Was the Right Direction}
+
+The earlier pipelines forced a mismatch between the problem and the model:
+\begin{itemize}[leftmargin=1.5em]
+  \item text-only world models assume category words are enough,
+  \item DINOv2 sliding windows assume similarity search alone is enough,
+  \item YOLO-World + DINOv2 still relies on a text-conditioned proposal stage.
+\end{itemize}
+
+In contrast, the actual unknown-object problem in this project is closer to:
+\begin{quote}
+``Here is one or several example views of the object. Find the same type of object in the rest of the dataset.''
+\end{quote}
+
+This is exactly the setting T-Rex2 is designed for through visual prompting.
+
+\subsection{Conceptual Workflow}
+
+T-Rex2 takes one or more reference images with manually specified boxes and then performs object detection on a separate target image. Importantly, it does not perform temporal tracking. Instead, it treats each target frame independently:
+\[
+\text{reference set} + \text{target frame} \rightarrow \text{detections in that frame}.
+\]
+
+This is appropriate here because the dataset contains large viewpoint jumps rather than smooth temporal motion.
+
+\subsection{Why Multiple Reference Frames Help}
+
+Multiple references improve robustness because a single reference crop captures only one object appearance. By providing several reference frames, the model sees:
+\begin{itemize}[leftmargin=1.5em]
+  \item different viewpoints,
+  \item different scales,
+  \item different local lighting and occlusion conditions.
+\end{itemize}
+
+The target frame then only needs to resemble one of the references well. This is particularly important for small hardware objects whose appearance changes significantly across view angle.
+
+\subsection{Advantages Over Earlier Stages}
+
+Relative to the earlier pipelines, T-Rex2 is a cleaner match to the task:
+\begin{itemize}[leftmargin=1.5em]
+  \item it does not require fragile text prompts,
+  \item it directly supports one-shot or few-shot exemplar detection,
+  \item it naturally handles an unordered set of target frames,
+  \item it benefits from multiple reference images without retraining.
+\end{itemize}
+
+\subsection{Practical Caveat}
+
+T-Rex2 is still not a full multi-frame reasoning system. It does not automatically fuse detections across frames or decide which detection sequence is the correct 3D object instance. Those decisions still belong to the downstream geometric stage. However, among the unknown-object detectors tested, it is the closest conceptual fit to the actual project requirement.
+
+\section{Comparative Discussion}
+
+\subsection{Known Objects}
+
+For known objects, the supervised YOLO branch is clearly the correct choice. The classes are small, fixed, and available in labeled form. A detector trained directly on those classes and run with SAHI-style slicing is more data-efficient and more reliable than any zero-shot alternative.
+
+The main lesson from this branch is that small-object scale is the dominant issue. Slicing is not optional; it changes the detector from a weak baseline into a usable one.
+
+\subsection{Unknown Objects}
+
+For unknown objects, the progression of methods demonstrates a useful pattern:
+\begin{enumerate}[leftmargin=1.5em]
+  \item \textbf{text-only models fail semantically,}
+  \item \textbf{slicing fixes scale but not ambiguity,}
+  \item \textbf{feature matching fixes ambiguity but can be computationally heavy and visually brittle,}
+  \item \textbf{proposal + feature ranking is stronger,}
+  \item \textbf{visual prompting is the most natural formulation.}
+\end{enumerate}
+
+The unknown-object problem is therefore not best understood as generic zero-shot classification. It is better understood as a few-shot exemplar localization problem across a multi-view dataset.
+
+\section{Conclusion}
+
+This project required two different detection philosophies.
+
+For the baseline known objects, the best solution was a trained YOLO detector with careful label cleaning, geometry-aware augmentation, and SAHI sliced inference. The empirical conclusion is that without SAHI, the small sockets are too small for reliable detection.
+
+For unknown objects, no single text-based world model was sufficient. GroundingDINO and YOLO-World were useful as proposal generators, especially once slicing was added, but they remained unstable because the objects are both small and semantically ambiguous. DINOv2-based visual matching improved the situation by grounding detections in a reference crop rather than a text prompt, but exhaustive sliding windows were expensive and still vulnerable to distractors. The hybrid YOLO-World plus DINOv2 pipeline was stronger because it reduced the search space while preserving exemplar matching. The most appropriate final direction was T-Rex2, because it directly supports visual prompting and fits the true problem formulation: detect the same object across multiple, non-sequential frames using one or more example views.
+
+The overall lesson is that small-object detection in cluttered multi-view scenes requires both scale handling and appearance conditioning. Scale handling was addressed by SAHI-style slicing. Appearance conditioning evolved from fragile text prompts to direct visual prompting. This progression forms the detection foundation for the later 3D localization stage.
+
+\section*{Appendix: Concrete Notebook Evidence}
+
+\begin{itemize}[leftmargin=1.5em]
+  \item \texttt{RP\_3class.ipynb}: three-class YOLO-26 training for \texttt{power\_socket}, \texttt{ethernet\_port}, and \texttt{vga\_socket}, followed by SAHI inference.
+  \item \texttt{RP\_11class\_merged.ipynb}: expanded multi-class training including easier objects such as bottle and purifier, useful for sanity checks and comparative behavior.
+  \item \texttt{sahi\_groundingdino\_pipeline\_colab.ipynb}: manual SAHI-style slicing for GroundingDINO, including batched tile inference and object-only prompts.
+  \item \texttt{recommended\_pipeline\_colab.ipynb}: two-stage panel-to-port detection experiments and debugging notes.
+  \item \texttt{DINO\_V2\_SW.ipynb}: pure DINOv2 reference-crop feature matching with multi-scale sliding windows.
+  \item \texttt{yolo\_world\_exemplar\_pipeline\_colab.ipynb}: YOLO-World proposal generation with DINOv2-based exemplar ranking.
+\end{itemize}
+
+\end{document}

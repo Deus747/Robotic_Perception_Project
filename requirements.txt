@@ -1,0 +1,12 @@
+numpy
+scipy
+pillow
+opencv-python
+matplotlib
+ultralytics
+sahi
+torch
+torchvision
+transformers
+requests
+tqdm

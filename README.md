@@ -339,3 +339,9 @@ The original notebooks were not committed. Their important sections were convert
 - YOLO-World + DINOv2 exemplar ranking: `unsupervised/yoloworld_dinov2_exemplar.py`
 - T-Rex2 visual prompting and OBB app: `app/`
 - 3D OBB fitting: `reconstruction/`
+
+## Final Day Results:
+
+<img width="2560" height="1440" alt="image" src="https://github.com/user-attachments/assets/3021b719-c0d9-4ddc-ae7f-e0cb881d5174" />
+
+Reconstructed obb from the answer.json on the given test images
